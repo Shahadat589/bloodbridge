@@ -1,0 +1,219 @@
+(function(){
+  var GROUPS=['A+','A-','B+','B-','AB+','AB-','O+','O-'];
+  var RECEIVE_FROM={'A+':['A+','A-','O+','O-'],'A-':['A-','O-'],'B+':['B+','B-','O+','O-'],'B-':['B-','O-'],
+               'AB+':['A+','A-','B+','B-','AB+','AB-','O+','O-'],'AB-':['A-','B-','AB-','O-'],'O+':['O+','O-'],'O-':['O-']};
+  var AREAS=['Dhanmondi','Gulshan','Mirpur','Mohammadpur','Uttara','Chattogram','Sylhet'];
+  var GAP=90; // days between donations
+  var DAY=864e5;
+  var KEY='blood-bridge-v1';
+
+  function daysAgo(n){return n==null?null:new Date(Date.now()-n*DAY).toISOString().slice(0,10)}
+  function seed(){
+    return {
+      donors:[
+        {id:1,name:'Tanvir Ahmed',group:'O+',phone:'01711000101',area:'Dhanmondi',last:daysAgo(140)},
+        {id:2,name:'Farzana Islam',group:'A+',phone:'01811000102',area:'Mirpur',last:daysAgo(200)},
+        {id:3,name:'Rafiul Karim',group:'B+',phone:'01911000103',area:'Uttara',last:daysAgo(30)},
+        {id:4,name:'Sadia Rahman',group:'O-',phone:'01611000104',area:'Dhanmondi',last:null},
+        {id:5,name:'Mahmudul Hasan',group:'AB+',phone:'01711000105',area:'Gulshan',last:daysAgo(95)},
+        {id:6,name:'Nusrat Sultana',group:'A-',phone:'01511000106',area:'Mohammadpur',last:daysAgo(120)},
+        {id:7,name:'Imran Hossain',group:'B-',phone:'01311000107',area:'Chattogram',last:daysAgo(180)},
+        {id:8,name:'Tasnim Akter',group:'O+',phone:'01711000108',area:'Uttara',last:daysAgo(60)},
+        {id:9,name:'Shafiq Chowdhury',group:'A+',phone:'01811000109',area:'Sylhet',last:daysAgo(300)},
+        {id:10,name:'Mim Jahan',group:'AB-',phone:'01911000110',area:'Mirpur',last:daysAgo(110)},
+        {id:11,name:'Arif Mahmud',group:'B+',phone:'01611000111',area:'Dhanmondi',last:daysAgo(240)},
+        {id:12,name:'Lubna Yasmin',group:'O+',phone:'01511000112',area:'Mirpur',last:daysAgo(150)},
+        {id:13,name:'Kamrul Islam',group:'O-',phone:'01711000113',area:'Gulshan',last:daysAgo(400)},
+        {id:14,name:'Samia Khan',group:'A+',phone:'01311000114',area:'Dhanmondi',last:daysAgo(15)}
+      ],
+      requests:[],
+      banks:[
+        {name:'Star Community Blood Desk',units:{'A+':14,'A-':3,'B+':11,'B-':2,'AB+':6,'AB-':1,'O+':18,'O-':4}},
+        {name:'City Hospital Blood Bank',units:{'A+':9,'A-':5,'B+':7,'B-':4,'AB+':3,'AB-':2,'O+':12,'O-':6}},
+        {name:'Red Crescent Youth Unit',units:{'A+':22,'A-':8,'B+':16,'B-':6,'AB+':10,'AB-':5,'O+':25,'O-':9}}
+      ],
+      nextId:15, nextReq:1001
+    };
+  }
+  var S;
+  try{var raw=localStorage.getItem(KEY); S=raw?JSON.parse(raw):seed();}catch(e){S=seed();}
+  if(!S||!S.donors){S=seed();}
+  function save(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
+
+  function esc(t){return String(t).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+  function $(id){return document.getElementById(id)}
+  function daysSince(d){return d?Math.floor((Date.now()-new Date(d).getTime())/DAY):null}
+  function eligible(d){var n=daysSince(d.last);return n==null||n>=GAP}
+  function nextDate(d){var t=new Date(new Date(d.last).getTime()+GAP*DAY);return t.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+  function fillSelect(el,items,first){el.innerHTML=(first?'<option value="">'+first+'</option>':'')+items.map(function(i){return '<option>'+i+'</option>'}).join('')}
+
+  /* ---------- finder ---------- */
+  var selGroup=null;
+  var tiles=$('tiles');
+  tiles.innerHTML=GROUPS.map(function(g){return '<button type="button" class="tile" role="radio" aria-checked="false" data-g="'+g+'">'+g+'<small>needed</small></button>'}).join('');
+  tiles.addEventListener('click',function(e){
+    var b=e.target.closest('.tile'); if(!b) return;
+    selGroup=selGroup===b.dataset.g?null:b.dataset.g;
+    Array.prototype.forEach.call(tiles.children,function(t){t.setAttribute('aria-checked',String(t.dataset.g===selGroup))});
+    renderResults();
+  });
+  tiles.addEventListener('keydown',function(e){
+    var k=e.key; if(k!=='ArrowRight'&&k!=='ArrowLeft'&&k!=='ArrowDown'&&k!=='ArrowUp') return;
+    var arr=Array.prototype.slice.call(tiles.children); var i=arr.indexOf(document.activeElement); if(i<0) return;
+    e.preventDefault(); var n=(k==='ArrowRight'||k==='ArrowDown')?(i+1)%arr.length:(i-1+arr.length)%arr.length; arr[n].focus();
+  });
+  fillSelect($('areaSel'),AREAS,'All areas');
+  $('areaSel').addEventListener('change',renderResults);
+  $('compat').addEventListener('change',renderResults);
+
+  function match(group,area,useCompat){
+    var okGroups=useCompat?RECEIVE_FROM[group].slice():[group];
+    return S.donors.filter(function(d){
+      return okGroups.indexOf(d.group)>-1 && (!area||d.area===area);
+    });
+  }
+  function renderResults(){
+    var list=$('results'), sum=$('summary');
+    if(!selGroup){sum.textContent='Select a blood group to see available donors.';list.innerHTML='';return;}
+    var area=$('areaSel').value, compat=$('compat').checked;
+    var found=match(selGroup,area,compat);
+    var ready=found.filter(eligible);
+    found.sort(function(a,b){
+      return (eligible(b)-eligible(a))||((b.group===selGroup)-(a.group===selGroup));
+    });
+    var where=area?' in '+area:' across all areas';
+    sum.textContent=ready.length+' donor'+(ready.length===1?'':'s')+' ready for '+selGroup+where+(found.length>ready.length?' ('+(found.length-ready.length)+' resting)':'');
+    if(!found.length){
+      list.innerHTML='<li class="empty">No registered donors match '+esc(selGroup)+where+'.<br>Try all areas, or send an emergency request so the Star team can reach out.<br><a class="btn red" href="#request" id="jumpReq">Request '+esc(selGroup)+' blood</a></li>';
+      $('jumpReq').addEventListener('click',function(){$('rGroup').value=selGroup;});
+      return;
+    }
+    list.innerHTML=found.map(function(d){
+      var ok=eligible(d);
+      var status=ok?'<span class="pill ok">Ready to donate</span>':'<span class="pill wait">Available from '+nextDate(d)+'</span>';
+      var exact=d.group===selGroup?' <span class="pill exact">Exact match</span>':'';
+      var masked=d.phone.slice(0,5)+' ••• •••';
+      return '<li class="donor"><span class="gbadge" aria-label="Blood group '+d.group+'">'+d.group+'</span>'+
+        '<div><strong>'+esc(d.name)+'</strong><small>'+esc(d.area)+'</small> '+status+exact+'</div>'+
+        '<button class="btn sm" type="button" data-phone="'+d.phone+'" '+(ok?'':'disabled')+'>'+(ok?'Show number':'Resting')+'</button></li>';
+    }).join('');
+  }
+  $('results').addEventListener('click',function(e){
+    var b=e.target.closest('button[data-phone]'); if(!b||b.disabled) return;
+    var p=b.dataset.phone;
+    b.outerHTML='<a class="btn sm red" style="text-decoration:none;display:inline-flex;align-items:center" href="tel:'+p+'">'+p+'</a>';
+  });
+
+  /* ---------- request ---------- */
+  fillSelect($('rGroup'),GROUPS,'Choose…');
+  fillSelect($('rArea'),AREAS,'Choose…');
+  var steps=[
+    ['Request received','Your details are saved.'],
+    ['Hospital check','Staff confirm the patient and hospital.'],
+    ['Matching donors alerted','Eligible donors get an SMS and email.'],
+    ['A donor accepts','You get their contact details.'],
+    ['Donation confirmed','The blood bank records the donation.']
+  ];
+  function drawFlow(done){
+    $('flow').innerHTML=steps.map(function(s,i){
+      return '<li class="'+(i<done?'done':'')+'"><span class="dot">'+(i<done?'✓':(i+1))+'</span><div><b>'+s[0]+'</b><span class="s">'+s[1]+'</span></div></li>';
+    }).join('');
+  }
+  drawFlow(0);
+  var timers=[];
+  $('reqForm').addEventListener('submit',function(e){
+    e.preventDefault();
+    timers.forEach(clearTimeout); timers=[];
+    var group=$('rGroup').value, area=$('rArea').value;
+    if(!group||!area) return;
+    var sameArea=match(group,area,true).filter(eligible);
+    var anywhere=match(group,'',true).filter(eligible);
+    var notified=sameArea.length?sameArea:anywhere;
+    var req={id:'BB-'+(S.nextReq++),patient:$('rPatient').value.trim(),group:group,units:+$('rUnits').value,
+      urgency:$('rUrgency').value,hospital:$('rHospital').value.trim(),area:area,contact:$('rContact').value.trim(),
+      notified:notified.length,status:'Open',at:new Date().toISOString()};
+    S.requests.unshift(req); save(); renderAdmin();
+    $('reqResult').innerHTML='';
+    drawFlow(0);
+    [1,2,3].forEach(function(n,i){timers.push(setTimeout(function(){drawFlow(n)},500*(i+1)));});
+    timers.push(setTimeout(function(){
+      if(notified.length){
+        drawFlow(4);
+        var first=notified[0];
+        $('reqResult').innerHTML='<div class="alert">Request '+req.id+' sent. '+notified.length+' eligible donor'+(notified.length===1?'':'s')+' alerted'+(sameArea.length?' in '+esc(area):' (none in '+esc(area)+', so nearby areas were used)')+'. '+esc(first.name.split(' ')[0])+' accepted in this demo.</div>';
+      }else{
+        drawFlow(3);
+        $('reqResult').innerHTML='<div class="alert" style="background:var(--warn-soft);color:var(--warn)">Request '+req.id+' saved, but no eligible donor with a compatible group was found. The Star team has been flagged to reach out and check the blood banks.</div>';
+      }
+    },2200));
+    $('reqForm').reset(); $('rUnits').value=1;
+  });
+
+  /* ---------- register ---------- */
+  fillSelect($('gGroup'),GROUPS,'Choose…');
+  fillSelect($('gArea'),AREAS,'Choose…');
+  $('gLast').max=new Date().toISOString().slice(0,10);
+  $('regForm').addEventListener('submit',function(e){
+    e.preventDefault();
+    var d={id:S.nextId++,name:$('gName').value.trim(),group:$('gGroup').value,phone:$('gPhone').value.trim(),
+      area:$('gArea').value,last:$('gLast').value||null};
+    S.donors.unshift(d); save();
+    var msg=eligible(d)?'You are ready to donate now and will appear in donor searches.':'You will be listed as ready from '+nextDate(d)+'.';
+    $('regResult').innerHTML='<div class="alert">Thank you, '+esc(d.name.split(' ')[0])+'. You are registered as '+d.group+' in '+esc(d.area)+'. '+msg+'</div>';
+    $('regForm').reset(); renderResults(); renderAdmin();
+  });
+  var ct=$('compTable');
+  ct.innerHTML='<tr><th>Patient group</th><th>Can receive from</th></tr>'+GROUPS.map(function(g){
+    return '<tr><td><b>'+g+'</b></td><td style="text-align:left">'+RECEIVE_FROM[g].join(', ')+'</td></tr>';
+  }).join('');
+
+  /* ---------- stock ---------- */
+  function cls(n){return n<5?'low':(n<10?'mid':'good')}
+  function renderStock(){
+    $('stockTable').innerHTML='<tr><th>Blood bank</th>'+GROUPS.map(function(g){return '<th>'+g+'</th>'}).join('')+'</tr>'+
+      S.banks.map(function(b){return '<tr><td>'+esc(b.name)+'</td>'+GROUPS.map(function(g){return '<td class="u '+cls(b.units[g])+'">'+b.units[g]+'</td>'}).join('')+'</tr>'}).join('');
+    $('admStock').innerHTML='<tr><th>Blood bank</th>'+GROUPS.map(function(g){return '<th>'+g+'</th>'}).join('')+'</tr>'+
+      S.banks.map(function(b,bi){return '<tr><td>'+esc(b.name)+'</td>'+GROUPS.map(function(g){
+        return '<td><span class="stepper"><button type="button" aria-label="Decrease '+g+' at '+esc(b.name)+'" data-b="'+bi+'" data-g="'+g+'" data-d="-1">−</button><b style="min-width:1.6em">'+b.units[g]+'</b><button type="button" aria-label="Increase '+g+' at '+esc(b.name)+'" data-b="'+bi+'" data-g="'+g+'" data-d="1">+</button></span></td>';
+      }).join('')+'</tr>'}).join('');
+  }
+  $('admStock').addEventListener('click',function(e){
+    var b=e.target.closest('button[data-b]'); if(!b) return;
+    var bank=S.banks[+b.dataset.b], g=b.dataset.g;
+    bank.units[g]=Math.max(0,bank.units[g]+(+b.dataset.d)); save(); renderStock();
+  });
+
+  /* ---------- admin ---------- */
+  function renderAdmin(){
+    var open=S.requests.filter(function(r){return r.status==='Open'}).length;
+    var ready=S.donors.filter(eligible).length;
+    var low=0; S.banks.forEach(function(b){GROUPS.forEach(function(g){if(b.units[g]<5)low++})});
+    $('stats').innerHTML=[[S.donors.length,'Registered donors'],[ready,'Ready to donate'],[open,'Open requests'],[low,'Low-stock entries']]
+      .map(function(s){return '<div class="stat"><b>'+s[0]+'</b><span>'+s[1]+'</span></div>'}).join('');
+    $('admReq').innerHTML='<tr><th>ID</th><th>Patient</th><th>Group</th><th>Units</th><th>Hospital</th><th>Alerted</th><th>Status</th><th></th></tr>'+
+      (S.requests.length?S.requests.map(function(r,i){
+        return '<tr><td>'+r.id+'</td><td>'+esc(r.patient)+'</td><td><b>'+r.group+'</b></td><td>'+r.units+'</td><td>'+esc(r.hospital)+', '+esc(r.area)+'</td><td>'+r.notified+'</td><td>'+
+        '<span class="pill '+(r.status==='Open'?'wait':'ok')+'">'+r.status+'</span></td><td>'+(r.status==='Open'?'<button class="btn sm ghost" type="button" data-fulfil="'+i+'">Mark fulfilled</button>':'')+'</td></tr>';
+      }).join(''):'<tr><td colspan="8" class="muted">No requests yet. Send one from the request form.</td></tr>');
+    $('admDonors').innerHTML='<tr><th>Name</th><th>Group</th><th>Area</th><th>Phone</th><th>Status</th><th></th></tr>'+
+      S.donors.map(function(d){
+        return '<tr><td>'+esc(d.name)+'</td><td><b>'+d.group+'</b></td><td>'+esc(d.area)+'</td><td>'+esc(d.phone)+'</td><td>'+
+        (eligible(d)?'<span class="pill ok">Ready</span>':'<span class="pill wait">Resting</span>')+'</td><td><button class="btn sm ghost" type="button" data-del="'+d.id+'" aria-label="Remove '+esc(d.name)+'">Remove</button></td></tr>';
+      }).join('');
+  }
+  $('admReq').addEventListener('click',function(e){
+    var b=e.target.closest('button[data-fulfil]'); if(!b) return;
+    S.requests[+b.dataset.fulfil].status='Fulfilled'; save(); renderAdmin();
+  });
+  $('admDonors').addEventListener('click',function(e){
+    var b=e.target.closest('button[data-del]'); if(!b) return;
+    var id=+b.dataset.del;
+    S.donors=S.donors.filter(function(d){return d.id!==id}); save(); renderAdmin(); renderResults();
+  });
+  $('resetBtn').addEventListener('click',function(){
+    S=seed(); save(); renderAll(); $('reqResult').innerHTML=''; $('regResult').innerHTML=''; drawFlow(0);
+  });
+
+  function renderAll(){renderResults();renderStock();renderAdmin();}
+  renderAll();
+})();
